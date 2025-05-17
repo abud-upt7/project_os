@@ -5,11 +5,14 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #define CMD_FILE "monitor_cmd.txt"
 pid_t monitor_pid = -1;
 int monitor_exiting = 0;
+int pipefd[2];
 
 void sigchld_handler(int sig) {
     int status;
@@ -30,6 +33,57 @@ void write_command(const char *command) {
     fprintf(f, "%s\n", command);
     fclose(f);
     kill(monitor_pid, SIGUSR1);
+
+    // Read output from pipe
+    char buffer[512];
+    ssize_t n;
+    close(pipefd[1]);
+    while ((n = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[n] = '\0';
+        printf("%s", buffer);
+    }
+    close(pipefd[0]);
+}
+
+void calculate_score() {
+    DIR *d = opendir("hunt");
+    if (!d) {
+        perror("opendir");
+        return;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        char path[512];
+        snprintf(path, sizeof(path), "hunt/%s", entry->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode) && strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+            int fd[2];
+            pipe(fd);
+            pid_t pid = fork();
+            if (pid == 0) {
+                dup2(fd[1], STDOUT_FILENO);
+                close(fd[0]);
+                close(fd[1]);
+                char path[256];
+                snprintf(path, sizeof(path), "hunt/%s/hunt_treasures.db", entry->d_name);
+                execl("./score_calc", "./score_calc", path, NULL);
+                perror("execl");
+                exit(EXIT_FAILURE);
+            } else {
+                close(fd[1]);
+                char buffer[512];
+                ssize_t n;
+                printf("Scores for hunt %s:\n", entry->d_name);
+                while ((n = read(fd[0], buffer, sizeof(buffer) - 1)) > 0) {
+                    buffer[n] = '\0';
+                    printf("%s", buffer);
+                }
+                close(fd[0]);
+                waitpid(pid, NULL, 0);
+            }
+        }
+    }
+    closedir(d);
 }
 
 int main() {
@@ -50,12 +104,17 @@ int main() {
                 printf("Monitor already running.\n");
                 continue;
             }
+            pipe(pipefd);
             monitor_pid = fork();
             if (monitor_pid == 0) {
-                execl("./monitor", "./monitor", NULL);
+                char fd_str[10];
+                snprintf(fd_str, sizeof(fd_str), "%d", pipefd[1]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                execl("./monitor", "./monitor", fd_str, NULL);
                 perror("execl");
                 exit(EXIT_FAILURE);
             }
+            close(pipefd[1]);
             printf("Monitor started with PID %d\n", monitor_pid);
         } else if (strcmp(input, "stop_monitor") == 0) {
             if (monitor_pid == -1) {
@@ -70,6 +129,8 @@ int main() {
                 continue;
             }
             break;
+        } else if (strcmp(input, "calculate_score") == 0) {
+            calculate_score();
         } else if (monitor_pid == -1 || monitor_exiting) {
             printf("Monitor not running or is stopping. Command blocked.\n");
         } else {

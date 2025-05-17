@@ -7,9 +7,26 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <Kernel/sys/dirent.h>
+#include <sys/dirent.h>
 
 #define CMD_FILE "monitor_cmd.txt"
 #define TREASURE_FILE "hunt_treasures.db"
+
+int output_fd = STDOUT_FILENO; // Default to stdout, will be overwritten by pipe
+
+void safe_print(const char *msg) {
+    dprintf(output_fd, "%s", msg);
+}
+
+// Define the Treasure structure before usage
+struct Treasure {
+    int id;
+    char username[50];
+    float lat, lon;
+    char clue[256];
+    int value;
+};
 
 void handle_signal(int sig) {
     FILE *f = fopen(CMD_FILE, "r");
@@ -31,7 +48,10 @@ void handle_signal(int sig) {
         }
         struct dirent *entry;
         while ((entry = readdir(d)) != NULL) {
-            if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+            struct stat st;
+            char full_path[256];
+            snprintf(full_path, sizeof(full_path), "hunt/%s", entry->d_name);
+            if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode) && strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
                 char path[256];
                 snprintf(path, sizeof(path), "hunt/%s/%s", entry->d_name, TREASURE_FILE);
                 FILE *tfile = fopen(path, "rb");
@@ -39,10 +59,12 @@ void handle_signal(int sig) {
                 if (tfile) {
                     fseek(tfile, 0, SEEK_END);
                     long size = ftell(tfile);
-                    count = size / sizeof(int) / 6; // rough estimate
+                    count = size / sizeof(struct Treasure); // rough estimate
                     fclose(tfile);
                 }
-                printf("Hunt: %s - Treasures: %d\n", entry->d_name, count);
+                char line[256];
+                snprintf(line, sizeof(line), "Hunt: %s - Treasures: %d\n", entry->d_name, count);
+                safe_print(line);
             }
         }
         closedir(d);
@@ -64,8 +86,10 @@ void handle_signal(int sig) {
             int value;
         } t;
         while (fread(&t, sizeof(t), 1, f) == 1) {
-            printf("ID: %d, User: %s, Lat: %.2f, Lon: %.2f, Clue: %s, Value: %d\n",
-                t.id, t.username, t.lat, t.lon, t.clue, t.value);
+            char line[512];
+            snprintf(line, sizeof(line), "ID: %d, User: %s, Lat: %.2f, Lon: %.2f, Clue: %s, Value: %d\n",
+                     t.id, t.username, t.lat, t.lon, t.clue, t.value);
+            safe_print(line);
         }
         fclose(f);
     } else if (strncmp(cmd, "view_treasure", 13) == 0) {
@@ -89,32 +113,38 @@ void handle_signal(int sig) {
         int found = 0;
         while (fread(&t, sizeof(t), 1, f) == 1) {
             if (t.id == tid) {
-                printf("ID: %d, User: %s, Lat: %.2f, Lon: %.2f, Clue: %s, Value: %d\n",
-                    t.id, t.username, t.lat, t.lon, t.clue, t.value);
+                char line[512];
+                snprintf(line, sizeof(line), "ID: %d, User: %s, Lat: %.2f, Lon: %.2f, Clue: %s, Value: %d\n",
+                         t.id, t.username, t.lat, t.lon, t.clue, t.value);
+                safe_print(line);
                 found = 1;
                 break;
             }
         }
         if (!found)
-            printf("Treasure ID %d not found.\n", tid);
+            safe_print("Treasure not found\n");
         fclose(f);
     } else if (strcmp(cmd, "stop_monitor") == 0) {
-        printf("Stopping monitor in 2 seconds...\n");
+        safe_print("Stopping monitor in 2 seconds...\n");
         usleep(2000000);
         exit(0);
     } else {
-        printf("Unknown command: %s\n", cmd);
+        safe_print("Unknown command\n");
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    if (argc > 1) {
+        output_fd = atoi(argv[1]);
+    }
+
     struct sigaction sa;
     sa.sa_handler = handle_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     sigaction(SIGUSR1, &sa, NULL);
 
-    printf("Monitor ready. Waiting for commands...\n");
+    safe_print("Monitor ready. Waiting for commands...\n");
     while (1) {
         pause();
     }
